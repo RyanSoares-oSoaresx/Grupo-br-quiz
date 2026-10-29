@@ -1,0 +1,29 @@
+name: Database Keep-Alive (Prevenção de Pausa por Inatividade)
+
+on:
+  schedule:
+    # Executa a cada 3 dias às 06:00 UTC para garantir que o banco nunca seja pausado por inatividade
+    - cron: '0 6 */3 * *'
+  workflow_dispatch: # Permite disparo manual
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Database Health Endpoint
+        env:
+          SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_KEY" ]; then
+            echo "Enviando ping para manter o banco de dados ativo..."
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "apikey: $SUPABASE_KEY" -H "Authorization: Bearer $SUPABASE_KEY" "$SUPABASE_URL/rest/v1/quiz_results?select=id&limit=1")
+            echo "Resposta HTTP do banco: $STATUS"
+            if [ "$STATUS" -eq 200 ] || [ "$STATUS" -eq 206 ]; then
+              echo "✅ Banco de dados confirmado como ATIVO e operacional!"
+            else
+              echo "⚠️ Resposta recebida: $STATUS"
+            fi
+          else
+            echo "ℹ️ Nenhuma variável de banco remoto configurada nos Secrets do GitHub. Operando no modo autônomo."
+          fi
