@@ -2,12 +2,12 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import {
   Trophy, Flame, Clock, CheckCircle2, XCircle, ArrowRight, RotateCcw,
   Shield, Download, Trash2, X, Lock, Zap, Gamepad2, Radio,
-  Volume2, VolumeX, Sparkles, AlertCircle
+  Volume2, VolumeX, Sparkles, AlertCircle, PlayCircle, Users
 } from 'lucide-react';
 import { db, QuizResult, LiveParticipant } from './lib/database';
 import { triggerVictoryConfetti } from './lib/confetti';
 
-// 12 PERGUNTAS FÁCEIS DE CONHECIMENTOS GERAIS PARA TESTES
+// 12 PERGUNTAS DE CONHECIMENTOS GERAIS
 const INITIAL_QUESTIONS = [
   {
     id: 'q1',
@@ -132,7 +132,7 @@ const AVATARS = [
   { id: 'unicorn', emoji: '🦄', label: 'Mítico' }
 ];
 
-// Efeitos Sonoros Web Audio API (zero dependências de arquivos externos)
+// Efeitos Sonoros Web Audio API nativa
 class SoundEffects {
   private ctx: AudioContext | null = null;
   public enabled = true;
@@ -155,8 +155,8 @@ class SoundEffects {
       osc.connect(gain);
       gain.connect(this.ctx.destination);
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(523.25, now); // C5
-      osc.frequency.exponentialRampToValueAtTime(783.99, now + 0.15); // G5
+      osc.frequency.setValueAtTime(523.25, now);
+      osc.frequency.exponentialRampToValueAtTime(783.99, now + 0.15);
       gain.gain.setValueAtTime(0.15, now);
       gain.gain.exponentialRampToValueAtTime(0.01, now + 0.25);
       osc.start(now);
@@ -183,11 +183,32 @@ class SoundEffects {
       osc.stop(now + 0.3);
     } catch {}
   }
+
+  playStreak() {
+    if (!this.enabled) return;
+    this.init();
+    if (!this.ctx) return;
+    try {
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(440, now);
+      osc.frequency.exponentialRampToValueAtTime(880, now + 0.1);
+      osc.frequency.exponentialRampToValueAtTime(1320, now + 0.2);
+      gain.gain.setValueAtTime(0.15, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+      osc.start(now);
+      osc.stop(now + 0.3);
+    } catch {}
+  }
 }
 
 const sounds = new SoundEffects();
 
-// Componente Logo Oficial do GRUPOBR com link e fallback elegante
+// Logo Oficial do GRUPOBR com fallback automático
 const GrupoBrLogo = ({ size = 'normal', showSubtitle = true }: { size?: 'normal' | 'large'; showSubtitle?: boolean }) => {
   const isLarge = size === 'large';
   const [imgError, setImgError] = useState(false);
@@ -374,7 +395,7 @@ export default function App() {
   const [adminPass, setAdminPass] = useState('');
   const [adminAuthError, setAdminAuthError] = useState('');
 
-  // Mantém refs estáveis para o Heartbeat para evitar cancelamentos desnecessários a cada segundo
+  // Refs para Heartbeat estável
   const stateRef = useRef({
     currentScreen,
     playerName,
@@ -382,7 +403,8 @@ export default function App() {
     currentQuestionIndex,
     questionsLength: questions.length,
     elapsedSeconds,
-    mySessionId
+    mySessionId,
+    streakCount
   });
 
   useEffect(() => {
@@ -393,47 +415,33 @@ export default function App() {
       currentQuestionIndex,
       questionsLength: questions.length,
       elapsedSeconds,
-      mySessionId
+      mySessionId,
+      streakCount
     };
-  }, [currentScreen, playerName, selectedAvatar, currentQuestionIndex, questions.length, elapsedSeconds, mySessionId]);
+  }, [currentScreen, playerName, selectedAvatar, currentQuestionIndex, questions.length, elapsedSeconds, mySessionId, streakCount]);
 
-  // Inscrição no status de conexão do banco de dados
+  // 1. Inscrição em Tempo Real (Broadcast + Nuvem) - ATUALIZA TUDO SEM F5!
   useEffect(() => {
-    return db.subscribeStatus((online) => setCloudConnected(online));
-  }, []);
+    const unsubData = db.subscribeData(({ results, active }) => {
+      setStudentResults(results);
+      setLiveParticipants(active);
+    });
 
-  // Sincronização periódica inteligente (a cada 3.5s)
-  useEffect(() => {
-    let isCancelled = false;
+    const unsubStatus = db.subscribeStatus((online) => {
+      setCloudConnected(online);
+    });
 
-    const syncData = async () => {
-      try {
-        const [results, active] = await Promise.all([
-          db.fetchResults(),
-          db.fetchLiveParticipants()
-        ]);
-        if (!isCancelled) {
-          if (Array.isArray(results)) setStudentResults(results);
-          if (Array.isArray(active)) setLiveParticipants(active);
-        }
-      } catch {}
-    };
-
-    syncData();
-    const interval = setInterval(syncData, 3500);
     return () => {
-      isCancelled = true;
-      clearInterval(interval);
+      unsubData();
+      unsubStatus();
     };
   }, []);
 
-  // Heartbeat do participante enquanto responde o quiz (sem efeito de loop por segundo)
+  // 2. Heartbeat em Tempo Real enquanto o jogador estiver respondendo o Quiz
   useEffect(() => {
-    if (currentScreen !== 'playing' || !playerName.trim()) {
-      return;
-    }
+    if (currentScreen !== 'playing' || !playerName.trim()) return;
 
-    const emitPulse = async () => {
+    const emitPulse = () => {
       const s = stateRef.current;
       if (s.currentScreen !== 'playing' || !s.playerName.trim()) return;
 
@@ -444,26 +452,26 @@ export default function App() {
         currentQ: s.currentQuestionIndex + 1,
         totalQ: s.questionsLength,
         elapsedSec: s.elapsedSeconds,
-        lastPing: Date.now()
+        lastPing: Date.now(),
+        streak: s.streakCount
       };
 
-      await db.updateLiveParticipant(myEntry);
+      db.emitLivePulse(myEntry);
     };
 
     // Pulso imediato
     emitPulse();
 
-    // Pulso estável a cada 3 segundos
-    const pulseTimer = setInterval(emitPulse, 3000);
+    // Pulso regular a cada 2.5s
+    const pulseTimer = setInterval(emitPulse, 2500);
 
-    // Limpeza ao desmontar ou sair
     return () => {
       clearInterval(pulseTimer);
       db.removeLiveParticipant(mySessionId);
     };
   }, [currentScreen, playerName, mySessionId]);
 
-  // Remove o participante ao fechar ou atualizar a aba
+  // Remove participante ao fechar ou atualizar a aba
   useEffect(() => {
     const handleUnload = () => {
       db.removeLiveParticipant(mySessionId);
@@ -524,6 +532,18 @@ export default function App() {
     setQuizStartTime(Date.now());
     setElapsedSeconds(0);
     setCurrentScreen('playing');
+
+    // Emite o pulso de entrada imediatamente no bloco Ao Vivo
+    db.emitLivePulse({
+      sessionId: mySessionId,
+      name: playerName.trim(),
+      avatar: selectedAvatar.emoji,
+      currentQ: 1,
+      totalQ: questions.length,
+      elapsedSec: 0,
+      lastPing: Date.now(),
+      streak: 0
+    });
   };
 
   const handleSelectOption = (idx: number) => {
@@ -535,10 +555,15 @@ export default function App() {
     setIsAnswerCorrect(correct);
 
     if (correct) {
-      sounds.playCorrect();
+      const newStreak = streakCount + 1;
+      if (newStreak >= 2) {
+        sounds.playStreak();
+      } else {
+        sounds.playCorrect();
+      }
+
       const timeSpent = Math.max(0, Math.floor((Date.now() - questionStartTime) / 1000));
       const speedScore = Math.max(30, (currQ.points || 150) - timeSpent * 10);
-      const newStreak = streakCount + 1;
       const multiplier = newStreak >= 3 ? 1.5 : newStreak === 2 ? 1.2 : 1;
       const gained = Math.round(speedScore * multiplier);
 
@@ -546,6 +571,18 @@ export default function App() {
       setCorrectAnswersCount((prev) => prev + 1);
       setStreakCount(newStreak);
       setBestStreak((prev) => Math.max(prev, newStreak));
+
+      // Atualiza o bloco Ao Vivo com a nova informação de combo
+      db.emitLivePulse({
+        sessionId: mySessionId,
+        name: playerName.trim(),
+        avatar: selectedAvatar.emoji,
+        currentQ: currentQuestionIndex + 1,
+        totalQ: questions.length,
+        elapsedSec: elapsedSeconds,
+        lastPing: Date.now(),
+        streak: newStreak
+      });
     } else {
       sounds.playWrong();
       setStreakCount(0);
@@ -563,6 +600,18 @@ export default function App() {
       setCurrentQuestionIndex(nextIdx);
       setTimeLeft(questions[nextIdx]?.timeLimit || 15);
       setQuestionStartTime(Date.now());
+
+      // Atualiza o progresso no bloco Ao Vivo em tempo real para todos verem!
+      db.emitLivePulse({
+        sessionId: mySessionId,
+        name: playerName.trim(),
+        avatar: selectedAvatar.emoji,
+        currentQ: nextIdx + 1,
+        totalQ: questions.length,
+        elapsedSec: elapsedSeconds,
+        lastPing: Date.now(),
+        streak: streakCount
+      });
     } else {
       // 1. Remove participante do bloco Ao Vivo
       await db.removeLiveParticipant(mySessionId);
@@ -582,12 +631,12 @@ export default function App() {
         totalQuestions: questions.length,
         timeSpentSeconds: elapsedSeconds,
         timestamp: timeStr,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        sessionId: mySessionId
       };
 
-      // 3. Salva no banco de dados resiliente
-      const updatedList = await db.saveResult(newResult);
-      setStudentResults(updatedList);
+      // 3. Salva no banco de dados e notifica todas as abas e dispositivos sem F5
+      await db.saveResult(newResult);
 
       // 4. Celebração com confetes
       triggerVictoryConfetti();
@@ -625,10 +674,58 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [currentScreen, showFeedbackModal, selectedOption, currentQuestionIndex, questions]);
 
+  // Função Surpresa: Simulação de Colaborador Ao Vivo para testes
+  const handleSimulateCollaborator = () => {
+    const simAvatars = ['🦊', '🚀', '⚡', '🐱', '🎮'];
+    const simNames = ['Mariana Costa', 'Lucas Mendes', 'Fernanda Lima', 'Rodrigo Alves', 'Juliana Rocha'];
+    const randomName = simNames[Math.floor(Math.random() * simNames.length)];
+    const randomAvatar = simAvatars[Math.floor(Math.random() * simAvatars.length)];
+    const simSessionId = 'sim_' + Date.now();
+
+    let step = 1;
+    let simStreak = 0;
+    let simScore = 0;
+
+    const interval = setInterval(async () => {
+      simStreak = Math.min(simStreak + 1, 4);
+      simScore += Math.floor(140 * (simStreak >= 3 ? 1.5 : 1));
+
+      if (step <= questions.length) {
+        await db.emitLivePulse({
+          sessionId: simSessionId,
+          name: `${randomName} (Demo)`,
+          avatar: randomAvatar,
+          currentQ: step,
+          totalQ: questions.length,
+          elapsedSec: step * 3,
+          lastPing: Date.now(),
+          streak: simStreak
+        });
+        step++;
+      } else {
+        clearInterval(interval);
+        await db.removeLiveParticipant(simSessionId);
+        const now = new Date();
+        const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+        await db.saveResult({
+          id: 'res_sim_' + Date.now(),
+          name: `${randomName} (Demo)`,
+          avatar: randomAvatar,
+          score: simScore,
+          accuracy: 92,
+          correctCount: 11,
+          totalQuestions: 12,
+          timeSpentSeconds: 38,
+          timestamp: timeStr,
+          createdAt: Date.now()
+        });
+      }
+    }, 2000);
+  };
+
   const handleClearHistory = async () => {
     if (window.confirm('Tem certeza que deseja limpar todo o histórico de resultados?')) {
       await db.clearResults();
-      setStudentResults([]);
     }
   };
 
@@ -701,7 +798,7 @@ export default function App() {
       <header className="relative z-10 w-full border-b border-slate-800/80 bg-slate-900/70 backdrop-blur-md px-4 sm:px-8 py-3.5 flex items-center justify-between">
         <GrupoBrLogo size="normal" showSubtitle={true} />
 
-        <div className="flex items-center gap-2.5 sm:gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
           {/* Alternador de Som */}
           <button
             onClick={() => {
@@ -715,13 +812,16 @@ export default function App() {
             {soundEnabled ? <Volume2 className="w-4 h-4 text-emerald-400" /> : <VolumeX className="w-4 h-4 text-slate-500" />}
           </button>
 
-          {/* Status da Conexão / Banco de Dados */}
+          {/* Status do Banco e Nuvem Realtime */}
           <div className={`flex items-center gap-2 px-3 py-1 rounded-full border text-xs font-semibold ${
             cloudConnected
-              ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-              : 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+              : 'bg-amber-500/10 border-amber-500/30 text-amber-400'
           }`}>
-            <Radio className={`w-3.5 h-3.5 ${cloudConnected ? 'animate-pulse text-emerald-400' : 'text-amber-400'}`} />
+            <span className="relative flex h-2 w-2">
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${cloudConnected ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+              <span className={`relative inline-flex rounded-full h-2 w-2 ${cloudConnected ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
+            </span>
             <span className="hidden sm:inline">{cloudConnected ? 'Nuvem Realtime Ativa' : 'Modo Offline-First'}</span>
             <span className="sm:hidden">{cloudConnected ? 'Online' : 'Local'}</span>
           </div>
@@ -851,38 +951,62 @@ export default function App() {
                 </div>
               </div>
 
-              {/* CARD AO VIVO NO QUIZ */}
-              <div className="bg-slate-900/80 border border-emerald-500/30 rounded-2xl p-4 sm:p-5 backdrop-blur-md shadow-xl">
+              {/* CARD AO VIVO NO QUIZ (ATUALIZAÇÃO 100% AUTOMÁTICA EM TEMPO REAL) */}
+              <div className="bg-slate-900/80 border border-emerald-500/40 rounded-2xl p-4 sm:p-5 backdrop-blur-md shadow-xl shadow-emerald-950/20">
                 <div className="flex items-center justify-between mb-3 border-b border-slate-800 pb-2.5">
                   <div className="flex items-center gap-2">
-                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
+                    <div className="relative flex h-3 w-3">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+                    </div>
                     <h3 className="text-xs font-bold uppercase tracking-wider text-white">Ao Vivo no Quiz</h3>
                   </div>
-                  <span className="text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
-                    {liveParticipants.length > 0 ? `${liveParticipants.length} ativo(s)` : 'Aguardando'}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/30">
+                      {liveParticipants.length > 0 ? `${liveParticipants.length} ativo(s)` : 'Aguardando'}
+                    </span>
+                    <button
+                      onClick={handleSimulateCollaborator}
+                      title="Testar simulação ao vivo de colaborador"
+                      className="text-[10px] flex items-center gap-1 font-semibold text-cyan-400 hover:text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 px-2 py-0.5 rounded-full border border-cyan-500/30 transition-all cursor-pointer"
+                    >
+                      <PlayCircle className="w-3 h-3" />
+                      <span>Simular</span>
+                    </button>
+                  </div>
                 </div>
 
                 {liveParticipants.length > 0 ? (
                   <div className="space-y-2.5">
                     {liveParticipants.map((p, idx) => (
-                      <div key={p.sessionId || idx} className="bg-slate-950/70 border border-slate-800 rounded-xl p-3 flex flex-col gap-2">
+                      <div
+                        key={p.sessionId || idx}
+                        className="bg-slate-950/80 border border-emerald-500/30 rounded-xl p-3 flex flex-col gap-2 shadow-md transition-all animate-in fade-in duration-300"
+                      >
                         <div className="flex items-center justify-between text-xs">
                           <div className="flex items-center gap-2">
-                            <span className="text-base">{p.avatar}</span>
+                            <span className="text-lg filter drop-shadow">{p.avatar}</span>
                             <span className="font-bold text-white">{p.name}</span>
-                            <span className="text-emerald-400 font-bold bg-emerald-500/10 px-1.5 py-0.5 rounded text-[11px]">
-                              {p.currentQ}/{p.totalQ}
+                            {p.streak && p.streak >= 2 ? (
+                              <span className="flex items-center gap-0.5 text-[10px] font-bold text-amber-400 bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.2 rounded-full">
+                                <Flame className="w-2.5 h-2.5 animate-bounce" /> {p.streak}x
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="flex items-center gap-2 text-[11px]">
+                            <span className="text-emerald-400 font-bold bg-emerald-500/10 px-1.5 py-0.5 rounded">
+                              Q{p.currentQ}/{p.totalQ}
+                            </span>
+                            <span className="text-slate-400 font-mono">
+                              {formatTimer(p.elapsedSec)}
                             </span>
                           </div>
-                          <span className="text-slate-400 text-[11px] font-mono">
-                            tempo <strong className="text-slate-200">{formatTimer(p.elapsedSec)}</strong>
-                          </span>
                         </div>
-                        {/* Barra de Progresso */}
-                        <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+
+                        {/* Barra de Progresso Animada em Tempo Real */}
+                        <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
                           <div
-                            className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-300"
+                            className="bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-400 h-full rounded-full transition-all duration-700 ease-out shadow-sm shadow-emerald-500/50"
                             style={{ width: `${Math.min(100, (p.currentQ / p.totalQ) * 100)}%` }}
                           />
                         </div>
@@ -890,15 +1014,15 @@ export default function App() {
                     ))}
                   </div>
                 ) : (
-                  <div className="text-center py-4 text-xs text-slate-400">
+                  <div className="text-center py-5 text-xs text-slate-400">
                     <Clock className="w-6 h-6 text-slate-600 mx-auto mb-1.5" />
                     Nenhum colaborador fazendo a prova no momento. <br />
-                    <span className="text-slate-300 font-medium">Inicie o quiz para ver seu status aqui ao vivo!</span>
+                    <span className="text-slate-300 font-medium">Inicie o quiz ou clique em <strong>"Simular"</strong> para ver a mágica ao vivo!</span>
                   </div>
                 )}
               </div>
 
-              {/* CARD RANKING EM TEMPO REAL */}
+              {/* CARD RANKING EM TEMPO REAL (SEM NECESSIDADE DE F5) */}
               <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 sm:p-5 backdrop-blur-md shadow-xl flex flex-col max-h-[360px]">
                 <div className="flex items-center justify-between mb-3 border-b border-slate-800 pb-2.5">
                   <div className="flex items-center gap-2">
@@ -906,7 +1030,7 @@ export default function App() {
                     <h3 className="text-xs font-bold uppercase tracking-wider text-white">Ranking em Tempo Real</h3>
                   </div>
                   <span className="text-[10px] text-emerald-400 font-semibold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
-                    SINCRONIZADO
+                    AUTO-SYNC (SEM F5)
                   </span>
                 </div>
 
@@ -917,7 +1041,7 @@ export default function App() {
                         key={item.id || idx}
                         className={`flex items-center justify-between p-2.5 rounded-xl border transition-all ${
                           idx === 0
-                            ? 'bg-amber-500/10 border-amber-500/40 text-amber-200'
+                            ? 'bg-amber-500/10 border-amber-500/40 text-amber-200 shadow-md shadow-amber-950/20'
                             : idx === 1
                             ? 'bg-slate-700/30 border-slate-600/40 text-slate-200'
                             : idx === 2
@@ -927,7 +1051,7 @@ export default function App() {
                       >
                         <div className="flex items-center gap-2.5">
                           <span className={`w-5 text-center font-black text-xs ${idx === 0 ? 'text-amber-400' : 'text-slate-400'}`}>
-                            #{idx + 1}
+                            {idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`}
                           </span>
                           <span className="text-lg">{item.avatar}</span>
                           <div>
@@ -1134,6 +1258,13 @@ export default function App() {
               {/* Botões de Ação */}
               <div className="flex items-center gap-2 flex-wrap">
                 <button
+                  onClick={handleSimulateCollaborator}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 text-xs font-semibold border border-cyan-500/30 transition-all cursor-pointer"
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>Simular Participante</span>
+                </button>
+                <button
                   onClick={handleExportCSV}
                   disabled={studentResults.length === 0}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-semibold border border-emerald-500/30 transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
@@ -1172,7 +1303,7 @@ export default function App() {
               <AlertCircle className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
               <div>
                 <strong className="text-white block mb-0.5">Banco de Dados Ativo e Permanente</strong>
-                O QuizPulse está configurado com arquitetura de alta disponibilidade que não perde acesso por inatividade. O schema SQL de backup e o keep-alive automatizado via GitHub Actions mantêm a persistência 100% ativa sem custos.
+                O QuizPulse está conectado ao armazenamento em nuvem de alta disponibilidade com sincronização em tempo real nativa (BroadcastChannel + Cloud Relay + Vercel Serverless). Nenhuma alteração é perdida e o banco nunca pausa por inatividade.
               </div>
             </div>
 
